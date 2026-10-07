@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>This Week</title>
+<style>
+:root{--bg:#eef2f1;--ink:#14231f;--mute:#5d716b;--card:#fff;--line:#d4dedb;--accent:#0b6e5c;--hi:#e4f1ee}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1917;--ink:#e6f0ed;--mute:#8da39d;--card:#16231f;--line:#27403a;--accent:#4fd1b4;--hi:#1b312c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,'Times New Roman',serif}
+.wrap{max-width:880px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:2rem;margin:0 0 4px;letter-spacing:-.02em}
+.sub{color:var(--mute);font-family:system-ui,sans-serif;font-size:.9rem}
+.top{display:grid;gap:12px;grid-template-columns:1fr;margin:18px 0}
+@media(min-width:700px){.top{grid-template-columns:1fr 1fr}}
+.box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;font-family:system-ui,sans-serif}
+.clock{font-size:2.2rem;font-weight:600;font-variant-numeric:tabular-nums}
+.wx{font-size:2.2rem;font-weight:600}
+.small{color:var(--mute);font-size:.85rem}
+.cd{display:none;background:var(--accent);color:#fff;border-radius:10px;padding:18px;margin-bottom:14px;font-family:system-ui,sans-serif}
+.cd.on{display:block}
+.cd b{font-size:2.4rem;font-variant-numeric:tabular-nums;display:block}
+.cd button{float:right;background:transparent;border:1px solid #fff8;color:#fff;border-radius:6px;padding:4px 10px;cursor:pointer}
+.day{margin:22px 0 8px;font-size:1.15rem;border-bottom:1px solid var(--line);padding-bottom:4px}
+.ev{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:6px 0;cursor:pointer;font:inherit;color:inherit}
+.ev:hover,.ev:focus-visible{outline:2px solid var(--accent)}
+.ev.sel{background:var(--hi);border-color:var(--accent)}
+.ev.past{opacity:.5}
+.ev .t{font-family:system-ui,sans-serif;font-size:.85rem;color:var(--mute)}
+.ev .n{font-weight:600}
+.cfg{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+input{flex:1;min-width:200px;padding:9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit;font-family:system-ui,sans-serif}
+.btn{padding:9px 14px;border:0;border-radius:6px;background:var(--accent);color:var(--bg);cursor:pointer;font-family:system-ui,sans-serif}
+.err{color:#c0392b;font-family:system-ui,sans-serif;font-size:.9rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">This week</h1>
+  <div class="sub" id="range"></div>
+
+  <div class="top">
+    <div class="box"><div class="clock" id="clock">--:--</div><div class="small" id="tz"></div></div>
+    <div class="box"><div class="wx" id="wx">Weather…</div><div class="small" id="wxd">Waiting for location permission</div></div>
+  </div>
+
+  <div class="cd" id="cd" aria-live="off"><button id="cdx">Clear</button><div id="cdname"></div><b id="cdt"></b><div id="cdwhen"></div></div>
+
+  <div id="list"></div>
+  <div class="err" id="err"></div>
+
+  <div class="box" style="margin-top:24px">
+    <div class="small">Calendar link (.ics) — saved in this browser</div>
+    <div class="cfg"><input id="url" placeholder="https://…/calendar.ics"><button class="btn" id="load">Load</button></div>
+    <div class="cfg"><input id="paste" placeholder="Or paste raw .ics text if the link is blocked"><button class="btn" id="loadp">Use text</button></div>
+  </div>
+</div>
+
+<script>
+// ===== SET YOUR DEFAULT .ICS LINK HERE =====
+// Your own proxy (see worker.js). Leave "" to use direct fetch + public proxies.
+const PROXY = "";
+const DEFAULT_ICS = "https://calendar.google.com/calendar/ical/brookes.ac.uk_jpnu264koojo6fqqn39ug9sg0k%40group.calendar.google.com/public/basic.ics";
+// ===========================================
+const $ = id => document.getElementById(id);
+const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+let events = [], selected = null;
+const store = { get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}} };
+
+// ---------- ICS parsing ----------
+function unfold(t){return t.replace(/\r?\n[ \t]/g,'')}
+function parseDate(v, params){
+  const m = v.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z?))?$/);
+  if(!m) return null;
+  if(!m[4]) return new Date(+m[1],m[2]-1,+m[3]); // all-day, local
+  if(m[7]) return new Date(Date.UTC(+m[1],m[2]-1,+m[3],+m[4],+m[5],+m[6]));
+  const tzid = (params.match(/TZID=([^;:]+)/)||[])[1];
+  if(tzid){ // convert from named zone to UTC
+    try{
+      const guess = Date.UTC(+m[1],m[2]-1,+m[3],+m[4],+m[5],+m[6]);
+      const f = new Intl.DateTimeFormat('en-US',{timeZone:tzid,hourCycle:'h23',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric'});
+      const p = Object.fromEntries(f.formatToParts(new Date(guess)).map(x=>[x.type,x.value]));
+      const asZone = Date.UTC(+p.year,p.month-1,+p.day,+p.hour,+p.minute,+p.second);
+      return new Date(guess-(asZone-guess));
+    }catch(e){}
+  }
+  return new Date(+m[1],m[2]-1,+m[3],+m[4],+m[5],+m[6]);
+}
+function parseICS(text){
+  const out=[]; let cur=null;
+  for(const line of unfold(text).split(/\r?\n/)){
+    if(line==='BEGIN:VEVENT'){cur={}} else if(line==='END:VEVENT'){ if(cur&&cur.start)out.push(cur); cur=null }
+    else if(cur){
+      const i=line.indexOf(':'); if(i<0)continue;
+      const key=line.slice(0,i), val=line.slice(i+1), name=key.split(';')[0], params=key.slice(name.length);
+      if(name==='DTSTART'){cur.start=parseDate(val,params);cur.allDay=!/T/.test(val)}
+      else if(name==='DTEND')cur.end=parseDate(val,params);
+      else if(name==='SUMMARY')cur.title=val.replace(/\\,/g,',').replace(/\\n/g,' ');
+      else if(name==='LOCATION')cur.loc=val.replace(/\\,/g,',');
+      else if(name==='RRULE')cur.rrule=val;
+    }
+  }
+  return out;
+}
+// Expand simple recurring rules (DAILY/WEEKLY, with BYDAY/UNTIL/COUNT/INTERVAL) inside the window
+function expand(evs, from, to){
+  const res=[], D=['SU','MO','TU','WE','TH','FR','SA'];
+  for(const e of evs){
+    if(!e.rrule){ if(e.start<to && (e.end||e.start)>=from) res.push(e); continue; }
+    const r=Object.fromEntries(e.rrule.split(';').map(p=>p.split('=')));
+    const until=r.UNTIL?parseDate(r.UNTIL.replace(/Z?$/,m=>m),'')||null:null;
+    const dur=(e.end||e.start)-e.start, step=(+r.INTERVAL||1);
+    let n=0;
+    for(let d=new Date(from.getFullYear(),from.getMonth(),from.getDate()-1); d<to; d.setDate(d.getDate()+1)){
+      const s=new Date(d); s.setHours(e.start.getHours(),e.start.getMinutes(),0,0);
+      if(s<e.start||(until&&s>until))continue;
+      const days=Math.round((new Date(s.getFullYear(),s.getMonth(),s.getDate())-new Date(e.start.getFullYear(),e.start.getMonth(),e.start.getDate()))/864e5);
+      let ok=false;
+      if(r.FREQ==='DAILY')ok=days%step===0;
+      else if(r.FREQ==='WEEKLY'){const by=r.BYDAY?r.BYDAY.split(',').map(x=>x.slice(-2)):[D[e.start.getDay()]];ok=by.includes(D[s.getDay()])&&Math.floor(days/7)%step===0}
+      else if(r.FREQ==='MONTHLY')ok=s.getDate()===e.start.getDate();
+      else if(r.FREQ==='YEARLY')ok=s.getDate()===e.start.getDate()&&s.getMonth()===e.start.getMonth();
+      if(ok&&s>=new Date(from-dur)&&s<to)res.push({...e,start:s,end:new Date(+s+dur),rrule:null});
+    }
+  }
+  return res;
+}
+
+// ---------- Week + render ----------
+function weekRange(){
+  const now=new Date(), s=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  s.setDate(s.getDate()-((s.getDay()+6)%7)); // Monday
+  const e=new Date(s); e.setDate(e.getDate()+7);
+  return [s,e];
+}
+const fmtT=d=>d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+function render(){
+  const [s,e]=weekRange();
+  $('range').textContent=s.toLocaleDateString([], {month:'short',day:'numeric'})+' – '+new Date(e-1).toLocaleDateString([], {month:'short',day:'numeric'})+' · times shown in '+tz;
+  const list=expand(events,s,e).sort((a,b)=>a.start-b.start);
+  const box=$('list'); box.innerHTML='';
+  if(!list.length){box.innerHTML='<p class="sub">'+(events.length?'No events this week.':'Add a calendar link below to get started.')+'</p>';return}
+  let lastDay='';
+  list.forEach(ev=>{
+    const day=ev.start.toLocaleDateString([], {weekday:'long',month:'short',day:'numeric'});
+    if(day!==lastDay){const h=document.createElement('h2');h.className='day';h.textContent=day;box.appendChild(h);lastDay=day}
+    const b=document.createElement('button');
+    const key=ev.title+ev.start.getTime();
+    b.className='ev'+((ev.end||ev.start)<new Date()?' past':'')+(selected&&selected.key===key?' sel':'');
+    b.innerHTML='<div class="n"></div><div class="t"></div>';
+    b.firstChild.textContent=ev.title||'(No title)';
+    b.lastChild.textContent=(ev.allDay?'All day':fmtT(ev.start)+(ev.end?' – '+fmtT(ev.end):''))+(ev.loc?' · '+ev.loc:'');
+    b.onclick=()=>{selected={key,start:ev.start,title:ev.title||'(No title)'};store.set('sel',JSON.stringify({key,t:+ev.start,title:selected.title}));render();tick()};
+    box.appendChild(b);
+  });
+}
+
+// ---------- Countdown + clock ----------
+function tick(){
+  const now=new Date();
+  $('clock').textContent=now.toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
+  $('tz').textContent=now.toLocaleDateString([], {weekday:'long',month:'long',day:'numeric'})+' · '+tz;
+  const cd=$('cd');
+  if(!selected){cd.classList.remove('on');return}
+  cd.classList.add('on');
+  $('cdname').textContent=selected.title;
+  $('cdwhen').textContent=selected.start.toLocaleString([], {weekday:'long',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  let ms=selected.start-now;
+  if(ms<=0){$('cdt').textContent='Started';return}
+  const d=Math.floor(ms/864e5),h=Math.floor(ms%864e5/36e5),m=Math.floor(ms%36e5/6e4),s=Math.floor(ms%6e4/1e3);
+  $('cdt').textContent=(d?d+'d ':'')+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+$('cdx').onclick=()=>{selected=null;store.set('sel','');render();tick()};
+
+// ---------- Loading ----------
+async function fetchICS(url){
+  // Always fetched fresh; the text lives only in memory (never saved to disk or storage).
+  const tries=[];
+  if(url===DEFAULT_ICS)tries.push('calendar.ics?t='+Date.now()); // copy refreshed by GitHub Actions
+  if(PROXY)tries.push(PROXY+(PROXY.includes('?')?'&':'?')+'url='+encodeURIComponent(url));
+  tries.push(url,'https://corsproxy.io/?'+encodeURIComponent(url),'https://api.allorigins.win/raw?url='+encodeURIComponent(url));
+  for(const t of tries){
+    try{const r=await fetch(t,{cache:'no-store'});if(r.ok){const x=await r.text();if(x.includes('BEGIN:VCALENDAR'))return x}}catch(e){}
+  }
+  throw new Error('Could not load the live calendar. Check the link is public, or set up the proxy in worker.js.');
+}
+async function load(url){
+  $('err').textContent='';
+  try{
+    events=parseICS(await fetchICS(url));
+    store.set('ics',url);
+    const s=store.get('sel');if(s){try{const o=JSON.parse(s);if(o.key)selected={key:o.key,start:new Date(o.t),title:o.title}}catch(e){}}
+    render();tick();
+  }catch(e){$('err').textContent=e.message}
+}
+$('load').onclick=()=>{const u=$('url').value.trim();if(u)load(u)};
+$('loadp').onclick=()=>{try{events=parseICS($('paste').value);render();tick();$('err').textContent=events.length?'':'No events found in that text.'}catch(e){$('err').textContent='Could not read that text.'}};
+
+// ---------- Weather (Open-Meteo, user's own location) ----------
+const WMO={0:'Clear',1:'Mostly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Fog',51:'Light drizzle',53:'Drizzle',55:'Heavy drizzle',61:'Light rain',63:'Rain',65:'Heavy rain',71:'Light snow',73:'Snow',75:'Heavy snow',80:'Showers',81:'Showers',82:'Heavy showers',95:'Thunderstorm',96:'Thunderstorm',99:'Thunderstorm'};
+function weather(){
+  if(!navigator.geolocation){$('wxd').textContent='Location not supported in this browser';return}
+  navigator.geolocation.getCurrentPosition(async p=>{
+    try{
+      const {latitude:la,longitude:lo}=p.coords;
+      const r=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${la}&longitude=${lo}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto`);
+      const j=await r.json(),c=j.current,d=j.daily;
+      $('wx').textContent=Math.round(c.temperature_2m)+'°C · '+(WMO[c.weather_code]||'—');
+      $('wxd').textContent=`Feels ${Math.round(c.apparent_temperature)}° · High ${Math.round(d.temperature_2m_max[0])}° / Low ${Math.round(d.temperature_2m_min[0])}° · Rain ${d.precipitation_probability_max[0]}% · Wind ${Math.round(c.wind_speed_10m)} km/h`;
+    }catch(e){$('wxd').textContent='Weather unavailable right now'}
+  },()=>{$('wx').textContent='Weather off';$('wxd').textContent='Allow location access to see local weather'},{timeout:10000});
+}
+
+// ---------- Start ----------
+const saved=store.get('ics')||DEFAULT_ICS;
+if(saved){$('url').value=saved;load(saved)}else render();
+weather();tick();setInterval(tick,1000);setInterval(()=>{if(saved)load($('url').value||saved)},300000);
+</script>
+</body>
+</html>
